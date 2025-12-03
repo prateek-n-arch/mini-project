@@ -15,6 +15,13 @@ interface AnalysisResult {
   supportType: "validation" | "coping" | "encouragement" | "crisis" | "exploration"
 }
 
+interface ConversationContext {
+  topics: string[]
+  emotionalJourney: string[]
+  userPreferences: string[]
+  sessionLength: number
+}
+
 // Sentiment and emotion detection
 const SENTIMENT_KEYWORDS = {
   crisis: [
@@ -122,19 +129,70 @@ const COPING_STRATEGIES = {
   ],
 }
 
-export function analyzeMentalState(message: string, recentMoods: MoodEntry[] = []): AnalysisResult {
+function buildConversationContext(history: any[]): ConversationContext {
+  const context: ConversationContext = {
+    topics: [],
+    emotionalJourney: [],
+    userPreferences: [],
+    sessionLength: history.length,
+  }
+
+  // Extract topics and emotional journey from conversation history
+  history.forEach((msg) => {
+    if (msg.role === "user") {
+      const lowerContent = msg.content.toLowerCase()
+
+      // Track emotional journey
+      if (SENTIMENT_KEYWORDS.negative.some((word) => lowerContent.includes(word))) {
+        context.emotionalJourney.push("struggling")
+      } else if (SENTIMENT_KEYWORDS.positive.some((word) => lowerContent.includes(word))) {
+        context.emotionalJourney.push("improving")
+      }
+
+      // Detect topics
+      if (lowerContent.includes("work") || lowerContent.includes("job")) {
+        if (!context.topics.includes("work")) context.topics.push("work")
+      }
+      if (lowerContent.includes("family") || lowerContent.includes("parent") || lowerContent.includes("sibling")) {
+        if (!context.topics.includes("family")) context.topics.push("family")
+      }
+      if (
+        lowerContent.includes("relationship") ||
+        lowerContent.includes("partner") ||
+        lowerContent.includes("dating")
+      ) {
+        if (!context.topics.includes("relationships")) context.topics.push("relationships")
+      }
+      if (lowerContent.includes("school") || lowerContent.includes("university") || lowerContent.includes("study")) {
+        if (!context.topics.includes("education")) context.topics.push("education")
+      }
+    }
+  })
+
+  return context
+}
+
+export function analyzeMentalState(
+  message: string,
+  recentMoods: MoodEntry[] = [],
+  emotionData?: { voice?: any; video?: any },
+): AnalysisResult {
   const lowerMessage = message.toLowerCase()
 
-  // Check for crisis keywords first
-  const hasCrisisKeywords = SENTIMENT_KEYWORDS.crisis.some((keyword) => lowerMessage.includes(keyword))
+  // Extract emotion insights from voice/video analysis if present
+  const voiceEmotionInsights: string[] = []
+  let videoEmotionInsights: string[] = []
 
-  if (hasCrisisKeywords) {
-    return {
-      sentiment: "crisis",
-      emotions: ["crisis"],
-      concerns: ["immediate safety"],
-      supportType: "crisis",
+  if (emotionData?.voice) {
+    voiceEmotionInsights.push(emotionData.voice.emotion)
+    // High intensity voice = possible stress/excitement
+    if (emotionData.voice.intensity === "high") {
+      voiceEmotionInsights.push("heightened emotional state")
     }
+  }
+
+  if (emotionData?.video) {
+    videoEmotionInsights = emotionData.video.emotions || []
   }
 
   // Detect emotions present in the message
@@ -177,7 +235,7 @@ export function analyzeMentalState(message: string, recentMoods: MoodEntry[] = [
 
   // Determine support type needed
   let supportType: AnalysisResult["supportType"]
-  if (lowerMessage.includes("?") && !hasCrisisKeywords) {
+  if (lowerMessage.includes("?") && !SENTIMENT_KEYWORDS.crisis.some((keyword) => lowerMessage.includes(keyword))) {
     supportType = "exploration"
   } else if (sentiment === "positive") {
     supportType = "encouragement"
@@ -187,15 +245,24 @@ export function analyzeMentalState(message: string, recentMoods: MoodEntry[] = [
     supportType = "validation"
   }
 
+  const combinedEmotions = [...detectedEmotions, ...voiceEmotionInsights, ...videoEmotionInsights].filter(
+    (v, i, a) => a.indexOf(v) === i,
+  ) // Remove duplicates
+
   return {
     sentiment,
-    emotions: detectedEmotions,
+    emotions: combinedEmotions.length > 0 ? combinedEmotions : detectedEmotions,
     concerns,
     supportType,
   }
 }
 
-export function generateResponse(message: string, analysis: AnalysisResult, conversationHistory: any[] = []): string {
+export function generateResponse(
+  message: string,
+  analysis: AnalysisResult,
+  conversationHistory: any[] = [],
+  emotionData?: { voice?: any; video?: any },
+): string {
   // Crisis response
   if (analysis.sentiment === "crisis") {
     return `I'm really concerned about what you're sharing. Your life matters, and there are people who want to help you right now. Please reach out to a crisis helpline immediately:
@@ -206,10 +273,17 @@ Crisis Text Line: Text HOME to 741741
 You don't have to face this alone. Professional support is available 24/7.`
   }
 
-  // Build personalized response based on analysis
+  const context = buildConversationContext(conversationHistory)
+  const isReturningToTopic = context.topics.some((topic) => message.toLowerCase().includes(topic))
+  const hasImproved =
+    context.emotionalJourney.length >= 2 &&
+    context.emotionalJourney[context.emotionalJourney.length - 1] === "improving" &&
+    context.emotionalJourney[context.emotionalJourney.length - 2] === "struggling"
+
+  // Build personalized response based on analysis and context
   let response = ""
 
-  // 1. Validation/acknowledgment
+  // 1. Context-aware validation/acknowledgment
   if (analysis.sentiment === "negative") {
     const validations = [
       `I hear you, and what you're feeling sounds really difficult.`,
@@ -217,6 +291,11 @@ You don't have to face this alone. Professional support is available 24/7.`
       `That sounds really tough. Your feelings are completely valid.`,
       `I can sense you're going through a challenging time right now.`,
     ]
+
+    if (isReturningToTopic && context.sessionLength > 3) {
+      response += `I remember you mentioned ${context.topics[context.topics.length - 1]} earlier. `
+    }
+
     response += validations[Math.floor(Math.random() * validations.length)] + " "
   } else if (analysis.sentiment === "positive") {
     const celebrations = [
@@ -225,6 +304,11 @@ You don't have to face this alone. Professional support is available 24/7.`
       `I'm so happy to hear that! Celebrating these wins with you.`,
       `That's really encouraging! Thank you for sharing this positive update.`,
     ]
+
+    if (hasImproved) {
+      response += `I'm noticing a positive shift from our earlier conversation. `
+    }
+
     response += celebrations[Math.floor(Math.random() * celebrations.length)] + " "
   }
 
@@ -270,14 +354,60 @@ You don't have to face this alone. Professional support is available 24/7.`
     response += encouragements[Math.floor(Math.random() * encouragements.length)]
   }
 
-  // 6. Gentle closing
+  if (emotionData?.voice || emotionData?.video) {
+    const emotionAwareness = []
+
+    if (emotionData.voice) {
+      if (emotionData.voice.intensity === "high") {
+        emotionAwareness.push(`I can sense a lot of energy in your voice`)
+      } else if (emotionData.voice.intensity === "low") {
+        emotionAwareness.push(`I notice your voice sounds quiet and gentle`)
+      }
+    }
+
+    if (emotionData.video) {
+      if (emotionData.video.overallMood === "upbeat") {
+        emotionAwareness.push(`I can see some brightness in your expression`)
+      } else if (emotionData.video.overallMood === "low energy") {
+        emotionAwareness.push(`I notice you might be feeling tired or low`)
+      }
+    }
+
+    if (emotionAwareness.length > 0) {
+      response = emotionAwareness.join(", and ") + ". " + response
+    }
+  }
+
+  // Context-aware gentle closing based on conversation length
   if (!response.includes("?")) {
-    const closings = [
-      `How are you feeling right now?`,
-      `Is there anything specific you'd like to talk about?`,
-      `What would feel most supportive for you right now?`,
-      `I'm here to listen. What's on your mind?`,
-    ]
+    let closings: string[]
+
+    if (context.sessionLength < 3) {
+      // Early in conversation - broad questions
+      closings = [
+        `How are you feeling right now?`,
+        `Is there anything specific you'd like to talk about?`,
+        `What would feel most supportive for you right now?`,
+        `I'm here to listen. What's on your mind?`,
+      ]
+    } else if (context.topics.length > 0) {
+      // Mid-conversation - reference topics
+      closings = [
+        `How is the ${context.topics[0]} situation affecting you today?`,
+        `Would you like to talk more about ${context.topics[0]}?`,
+        `What's been the hardest part about ${context.topics[0]} lately?`,
+        `Is there anything else about ${context.topics[0]} you'd like to explore?`,
+      ]
+    } else {
+      // Later conversation - deeper questions
+      closings = [
+        `What do you need most right now?`,
+        `How can I best support you in this moment?`,
+        `What would make today feel a little bit better?`,
+        `Is there something specific that's weighing on you?`,
+      ]
+    }
+
     response += " " + closings[Math.floor(Math.random() * closings.length)]
   }
 

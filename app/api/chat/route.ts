@@ -12,7 +12,7 @@ interface ChatMessage {
 export async function POST(request: Request) {
   try {
     const body = await request.json()
-    const { message, history = [] } = body
+    const { message, history = [], emotionData = null } = body
 
     if (!message) {
       return NextResponse.json({ error: "Message is required" }, { status: 400 })
@@ -21,9 +21,9 @@ export async function POST(request: Request) {
     const moodHistoryRes = await fetch(`${request.url.replace("/api/chat", "/api/mood/recent")}`)
     const recentMoods = moodHistoryRes.ok ? await moodHistoryRes.json() : []
 
-    const analysis = analyzeMentalState(message, recentMoods)
+    const analysis = analyzeMentalState(message, recentMoods, emotionData)
 
-    const responseText = generateResponse(message, analysis, history)
+    const responseText = generateResponse(message, analysis, history, emotionData)
 
     return NextResponse.json({
       role: "assistant" as const,

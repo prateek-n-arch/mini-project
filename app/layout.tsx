@@ -1,12 +1,28 @@
 import type React from "react"
 import type { Metadata, Viewport } from "next"
-import { Inter, DM_Sans } from "next/font/google"
+import { Inter, DM_Sans, Geist_Mono } from "next/font/google"
 import { Analytics } from "@vercel/analytics/next"
 import "./globals.css"
 import { Header } from "@/components/header"
+// import { RegisterServiceWorker } from "./register-sw"
 
-const inter = Inter({ subsets: ["latin"], variable: "--font-sans" })
-const dmSans = DM_Sans({ subsets: ["latin"], variable: "--font-display" })
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-inter",
+  display: "swap",
+})
+
+const dmSans = DM_Sans({
+  subsets: ["latin"],
+  variable: "--font-dm-sans",
+  display: "swap",
+})
+
+const geistMono = Geist_Mono({
+  subsets: ["latin"],
+  variable: "--font-geist-mono",
+  display: "swap",
+})
 
 export const metadata: Metadata = {
   title: "MindEcho - Your Mental Wellness Companion",
@@ -33,7 +49,7 @@ export const metadata: Metadata = {
         type: "image/svg+xml",
       },
     ],
-    apple: "/apple-icon.png",
+    apple: "/apple-icon.jpg",
   },
 }
 
@@ -52,7 +68,12 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${inter.variable} ${dmSans.variable} font-sans antialiased`}>
+      <body
+        className={`${inter.variable} ${dmSans.variable} ${geistMono.variable} antialiased`}
+        style={{
+          fontFamily: "var(--font-inter), system-ui, sans-serif",
+        }}
+      >
         <Header />
         {children}
         <Analytics />
