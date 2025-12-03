@@ -218,17 +218,73 @@ export function ChatInterface() {
       const emotionData = await response.json()
       console.log("[v0] Backend emotion analysis:", emotionData)
 
-      const emotionMessage = `[Image Analysis]\nDetected emotions: ${emotionData.emotions.join(", ")}\nDominant emotion: ${emotionData.dominantEmotion}\nMental state: ${emotionData.mentalState}\nConfidence: ${emotionData.confidence}%\n\nBased on your facial expression, you seem to be feeling ${emotionData.dominantEmotion}. Would you like to talk about it?`
+      const messageContent = `[Photo captured]`
 
-      setInput(emotionMessage)
+      const userMessage: ChatMessage = {
+        role: "user",
+        content: messageContent,
+        timestamp: new Date().toISOString(),
+      }
+
+      setMessages((prev) => [...prev, userMessage])
+      setIsLoading(true)
+
+      try {
+        const chatResponse = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: messageContent,
+            history: messages,
+            emotionData: {
+              visual: {
+                emotions: emotionData.emotions,
+                dominantEmotion: emotionData.dominantEmotion,
+                mentalState: emotionData.mentalState,
+                confidence: emotionData.confidence,
+              },
+            },
+          }),
+        })
+
+        if (!chatResponse.ok) throw new Error("Failed to get response")
+
+        const data = await chatResponse.json()
+        setMessages((prev) => [...prev, data])
+      } catch (error) {
+        console.error("[v0] Chat error:", error)
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "I'm having trouble responding right now. Please try again in a moment.",
+            timestamp: new Date().toISOString(),
+          },
+        ])
+      } finally {
+        setIsLoading(false)
+      }
 
       setTimeout(() => {
         setCapturedImage(null)
       }, 3000)
     } catch (error) {
       console.error("[v0] Error analyzing image emotion:", error)
-      setInput("[Image captured] Please describe how you're feeling right now.")
       setCapturedImage(null)
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "user",
+          content: "[Photo captured]",
+          timestamp: new Date().toISOString(),
+        },
+        {
+          role: "assistant",
+          content: "I captured your photo but had trouble analyzing it. How are you feeling right now?",
+          timestamp: new Date().toISOString(),
+        },
+      ])
     }
   }
 
@@ -236,7 +292,6 @@ export function ChatInterface() {
     try {
       console.log("[v0] Sending audio to backend for analysis")
 
-      // Send to backend for voice emotion analysis
       const formData = new FormData()
       formData.append("audio", audioBlob, "audio.webm")
 
@@ -250,7 +305,6 @@ export function ChatInterface() {
       const voiceData = await response.json()
       console.log("[v0] Backend voice analysis:", voiceData)
 
-      // Use browser's Speech Recognition API for transcription
       if ("webkitSpeechRecognition" in window || "SpeechRecognition" in window) {
         const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
         const recognition = new SpeechRecognition()
@@ -262,26 +316,74 @@ export function ChatInterface() {
           const transcript = event.results[0][0].transcript
           console.log("[v0] Transcribed text:", transcript)
 
-          // Add voice emotion analysis to the message
-          const messageWithEmotion = `${transcript}\n[Voice Analysis: ${voiceData.emotion} (${voiceData.confidence}% confident) - Energy: ${voiceData.energy}, Stress: ${voiceData.stress}]`
-          setInput(messageWithEmotion)
+          sendVoiceMessage(transcript, voiceData)
         }
 
         recognition.onerror = () => {
-          setInput(
-            `[Voice recorded]\nEmotion: ${voiceData.emotion}\nEnergy: ${voiceData.energy}\nStress level: ${voiceData.stress}\n\nPlease type what you wanted to say.`,
-          )
+          sendVoiceMessage("", voiceData)
         }
 
         recognition.start()
       } else {
-        setInput(
-          `[Voice recorded]\nEmotion: ${voiceData.emotion}\nEnergy: ${voiceData.energy}\nStress level: ${voiceData.stress}\n\nPlease type what you wanted to say.`,
-        )
+        sendVoiceMessage("", voiceData)
       }
     } catch (error) {
       console.error("[v0] Error in voice analysis:", error)
-      setInput("[Voice recorded] Please type your message.")
+      sendVoiceMessage("", null)
+    }
+  }
+
+  const sendVoiceMessage = async (transcript: string, voiceData: any) => {
+    const messageContent = transcript || "[Voice message recorded]"
+
+    const emotionData = voiceData
+      ? {
+          voice: {
+            emotion: voiceData.emotion,
+            energy: voiceData.energy,
+            stress: voiceData.stress,
+            confidence: voiceData.confidence,
+            details: voiceData.details,
+          },
+        }
+      : null
+
+    const userMessage: ChatMessage = {
+      role: "user",
+      content: messageContent,
+      timestamp: new Date().toISOString(),
+    }
+
+    setMessages((prev) => [...prev, userMessage])
+    setIsLoading(true)
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: messageContent,
+          history: messages,
+          emotionData,
+        }),
+      })
+
+      if (!response.ok) throw new Error("Failed to get response")
+
+      const data = await response.json()
+      setMessages((prev) => [...prev, data])
+    } catch (error) {
+      console.error("[v0] Chat error:", error)
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: "I'm having trouble responding right now. Please try again in a moment.",
+          timestamp: new Date().toISOString(),
+        },
+      ])
+    } finally {
+      setIsLoading(false)
     }
   }
 
@@ -294,7 +396,6 @@ export function ChatInterface() {
     let emotionData = null
     let cleanMessage = userMessage
 
-    // Check if message contains voice or video emotion analysis
     const voiceMatch = userMessage.match(/\[Voice Analysis: (.+?) - (.+?) intensity\]/)
     const videoMatch = userMessage.match(/\[Video Analysis\][\s\S]*?Overall mood: (.+?)\n/)
 
@@ -305,7 +406,6 @@ export function ChatInterface() {
           intensity: voiceMatch[2],
         },
       }
-      // Remove the emotion tag from display message
       cleanMessage = userMessage.replace(/\[Voice Analysis:.*?\]/, "").trim()
     }
 
@@ -322,7 +422,6 @@ export function ChatInterface() {
           confidence: confidenceMatch ? Number.parseInt(confidenceMatch[1]) : 0,
         },
       }
-      // Keep video analysis visible in message for now
     }
 
     setInput("")
@@ -379,7 +478,7 @@ export function ChatInterface() {
                 autoPlay
                 muted
                 playsInline
-                style={{ transform: "scaleX(-1)" }} // Mirror for selfie view
+                style={{ transform: "scaleX(-1)" }}
               />
               <div className="absolute bottom-4 left-1/2 flex -translate-x-1/2 gap-3">
                 <Button onClick={captureImage} size="lg" className="bg-primary hover:bg-primary/90">

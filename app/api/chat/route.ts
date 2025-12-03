@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { analyzeMentalState } from "@/lib/mental-health-ai"
+import { analyzeMultimodalEmotion } from "@/lib/emotion-model"
 
 export const maxDuration = 30
 
@@ -18,15 +18,17 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Message is required" }, { status: 400 })
     }
 
-    // Get recent mood history
-    const moodHistoryRes = await fetch(`${request.url.replace("/api/chat", "/api/mood/recent")}`)
-    const recentMoods = moodHistoryRes.ok ? await moodHistoryRes.json() : []
+    const analysis = await analyzeMultimodalEmotion(message, emotionData?.audioBuffer, emotionData?.imageData)
 
-    // Analyze mental state using local AI
-    const analysis = analyzeMentalState(message, recentMoods, emotionData)
+    console.log("[v0] Trained model analysis:", analysis)
 
-    // Crisis detection
-    if (analysis.sentiment === "crisis") {
+    // Crisis detection from model
+    if (
+      analysis.mentalHealthIndicators.depression > 85 ||
+      analysis.mentalHealthIndicators.anxiety > 90 ||
+      message.toLowerCase().includes("suicide") ||
+      message.toLowerCase().includes("kill myself")
+    ) {
       return NextResponse.json({
         role: "assistant" as const,
         content: `I'm really concerned about what you're sharing. Your life matters, and there are people who want to help you right now. Please reach out to a crisis helpline immediately:
@@ -40,13 +42,22 @@ You don't have to face this alone. Professional support is available 24/7. Pleas
       })
     }
 
-    // Generate intelligent response using local AI
-    const response = generateIntelligentResponse(message, analysis, history, emotionData, recentMoods)
+    // Get recent mood history
+    const moodHistoryRes = await fetch(`${request.url.replace("/api/chat", "/api/mood/recent")}`)
+    const recentMoods = moodHistoryRes.ok ? await moodHistoryRes.json() : []
+
+    // Generate response using model's emotion analysis
+    const response = generateIntelligentResponse(message, analysis, history, recentMoods)
 
     return NextResponse.json({
       role: "assistant" as const,
       content: response,
       timestamp: new Date().toISOString(),
+      emotionAnalysis: {
+        emotion: analysis.fusedEmotion.emotion,
+        confidence: analysis.fusedEmotion.confidence,
+        mentalHealth: analysis.mentalHealthIndicators,
+      },
     })
   } catch (error) {
     console.error("[v0] Error processing chat message:", error)
@@ -62,123 +73,162 @@ You don't have to face this alone. Professional support is available 24/7. Pleas
   }
 }
 
-function generateIntelligentResponse(
-  message: string,
-  analysis: any,
-  history: any[],
-  emotionData: any,
-  recentMoods: any[],
-): string {
-  const { emotions, sentiment, supportType, concerns, conversationContext } = analysis
+function generateIntelligentResponse(message: string, analysis: any, history: any[], recentMoods: any[]): string {
+  const { fusedEmotion, mentalHealthIndicators, voiceEmotion, visualEmotion } = analysis
 
   let response = ""
+  const detectedEmotion = fusedEmotion.emotion
+  const intensity = fusedEmotion.intensity
 
-  // 1. Acknowledge multimodal inputs
-  if (emotionData?.voice || emotionData?.video) {
-    const voiceEmotion = emotionData?.voice?.emotion
-    const facialEmotion = emotionData?.video?.dominantEmotion
-    const stressLevel = emotionData?.voice?.stress
-
-    if (voiceEmotion && facialEmotion && voiceEmotion !== facialEmotion) {
-      response += `I notice something interesting - your voice suggests ${voiceEmotion}, but your expression shows ${facialEmotion}. Sometimes we feel one way internally but show another externally. It's okay to have complex, layered emotions. `
-    } else if (voiceEmotion) {
-      response += `I can hear ${voiceEmotion} in your voice`
-      if (stressLevel === "high" || stressLevel === "elevated") {
-        response += `, and I notice some tension there. `
-      } else {
-        response += `. `
-      }
-    } else if (facialEmotion) {
-      response += `I can see ${facialEmotion} in your expression. `
+  if (voiceEmotion && visualEmotion) {
+    if (voiceEmotion.emotion !== visualEmotion.emotion) {
+      response += `I notice your voice suggests ${voiceEmotion.emotion} while your expression shows ${visualEmotion.emotion}. Sometimes our feelings are layered. `
     }
+  } else if (voiceEmotion) {
+    response += `I can hear ${voiceEmotion.emotion} in your voice. `
+  } else if (visualEmotion) {
+    response += `I can see ${visualEmotion.emotion} in your expression. `
   }
 
-  // 2. Validate their feelings based on sentiment
-  const validationPhrases = {
-    negative: [
-      "It's completely understandable to feel this way given what you're going through.",
-      "What you're feeling is valid, and I'm here to support you through this.",
-      "I hear you, and your feelings make sense. Thank you for trusting me with this.",
-      "These feelings are real and important. You're not alone in experiencing them.",
+  // Emotion-specific empathetic responses
+  const emotionResponses: Record<string, string[]> = {
+    happy: [
+      "I'm so glad to hear you're feeling happy! These positive moments deserve to be celebrated.",
+      "That's wonderful! Your joy is evident, and it's beautiful to witness.",
+      "I love hearing this happiness in your words! What's bringing you such joy?",
     ],
-    positive: [
-      "I'm genuinely glad to hear there's some brightness in your day.",
-      "It's wonderful that you're experiencing these positive feelings. That matters.",
-      "That's really great to hear! It's important to recognize and celebrate these moments.",
+    sad: [
+      "I hear your sadness, and I want you to know that what you're feeling matters. You're not alone.",
+      "I'm sorry you're going through this difficult time. Your feelings are completely valid.",
+      "Thank you for trusting me with your pain. I'm here to listen and support you.",
+    ],
+    angry: [
+      "I hear your anger. Often anger tells us something important to us has been violated or hurt.",
+      "Your frustration is completely understandable. Let's explore what's underneath this feeling.",
+      "It's okay to feel angry - that emotion is giving us important information about your needs.",
+    ],
+    fear: [
+      "I sense your fear, and that takes courage to share. Fear is often our mind trying to protect us.",
+      "What you're describing sounds frightening. You don't have to face this fear alone.",
+    ],
+    anxiety: [
+      "I can sense the anxiety you're experiencing. That racing, worried feeling is incredibly hard to sit with.",
+      "Anxiety can feel so overwhelming. Let's work through this together, one breath at a time.",
+      "I understand how unsettling anxious thoughts can be. Your nervous system is on high alert right now.",
+    ],
+    stress: [
+      "It sounds like you're under immense pressure right now. That overwhelmed feeling is your signal that you're carrying too much.",
+      "Stress can feel crushing. Let's see if we can break things down into smaller pieces.",
+      "I hear how overwhelmed you are. You don't have to solve everything at once.",
+    ],
+    hopeless: [
+      "What you're describing sounds like hopelessness, and I want you to know these feelings, while painful, are real.",
+      "I'm concerned about how defeated you're feeling. You don't have to face this darkness alone.",
+      "Hopelessness is one of the hardest emotions to sit with. Have you considered talking to a mental health professional?",
+    ],
+    lonely: [
+      "Loneliness can feel so isolating. I want you to know that you matter, even when you feel alone.",
+      "I hear how disconnected you're feeling. That isolation is real and valid.",
+    ],
+    overwhelmed: [
+      "Being overwhelmed means you're trying to handle too much at once. Let's identify what you can let go of.",
+      "That drowning feeling is your signal to pause and breathe. You don't have to do it all.",
+    ],
+    tired: [
+      "Exhaustion is your body and mind asking for rest. Have you been able to give yourself that?",
+      "Fatigue is real. Sometimes the most productive thing we can do is rest.",
+    ],
+    excited: [
+      "I can feel your excitement! That energized feeling is wonderful!",
+      "Your enthusiasm is contagious! Tell me more about what's got you so excited!",
+    ],
+    calm: [
+      "It's beautiful to hear you're feeling peaceful. These moments of calm are so valuable.",
+      "I'm glad you're in a centered place right now. Let's honor this feeling.",
+    ],
+    motivated: [
+      "Your determination is inspiring! That drive and focus will serve you well.",
+      "I love hearing how motivated you are. What goal are you working toward?",
     ],
     neutral: [
-      "Thank you for sharing that with me. I'm here to listen and support you.",
-      "I appreciate you opening up about this. Your thoughts and feelings matter.",
+      "I'm here to listen. What's really on your mind today?",
+      "Thanks for sharing with me. How are you truly feeling?",
+    ],
+    confusion: [
+      "Confusion can feel frustrating. Let's work through this together to find clarity.",
+      "It's okay not to have all the answers right now. What specifically feels unclear?",
+    ],
+    disgust: [
+      "That feeling of disgust is strong. What triggered this reaction?",
+      "I hear your revulsion. Sometimes disgust protects us from harmful situations.",
+    ],
+    surprise: [
+      "That sounds unexpected! How are you processing this surprise?",
+      "Surprise can throw us off balance. What happened?",
     ],
   }
 
-  const validationType = sentiment === "positive" ? "positive" : sentiment === "negative" ? "negative" : "neutral"
-  response +=
-    validationPhrases[validationType][Math.floor(Math.random() * validationPhrases[validationType].length)] + " "
+  const responses = emotionResponses[detectedEmotion] || emotionResponses.neutral
+  response += responses[Math.floor(Math.random() * responses.length)] + "\n\n"
 
-  // 3. Reference mood trends from history
-  if (recentMoods.length >= 3) {
-    const moodMap: any = { terrible: 1, bad: 2, okay: 3, good: 4, great: 5 }
-    const recentMoodValues = recentMoods.map((m: any) => moodMap[m.mood] || 3)
-    const avgMood = recentMoodValues.reduce((a: number, b: number) => a + b, 0) / recentMoodValues.length
-
-    const lastThree = recentMoodValues.slice(-3)
-    const isImproving = lastThree[2] > lastThree[0]
-    const isDeclining = lastThree[2] < lastThree[0]
-
-    if (avgMood < 2.5) {
-      response += "I've been noticing you've been having a really tough time lately. "
-      if (isImproving) {
-        response += "Though I do see some slight improvement, which shows your resilience. "
-      }
-    } else if (avgMood > 3.8) {
-      response += "I'm glad to see you've been feeling more positive recently. "
-    } else if (isDeclining && avgMood < 3.5) {
-      response += "I notice things have been feeling a bit harder lately. "
-    }
+  if (intensity > 80) {
+    response +=
+      "I can sense the intensity of what you're feeling right now. These strong emotions need space and acknowledgment.\n\n"
   }
 
-  // 4. Address specific emotions with evidence-based strategies
-  if (emotions.includes("anxious") || emotions.includes("worried") || emotionData?.voice?.stress === "high") {
+  if (mentalHealthIndicators.stress > 70) {
     response +=
-      "\n\nFor anxiety, I'd like to suggest a quick technique: Try the **4-7-8 breathing** - breathe in for 4 counts, hold for 7, exhale slowly for 8. This activates your parasympathetic nervous system and can help calm your mind. "
-
-    if (emotionData?.voice?.stress === "high") {
-      response +=
-        "I also notice tension in your voice. Try placing one hand on your chest and one on your belly, and focus on making your belly rise with each breath. This shifts you from chest breathing (stress response) to diaphragmatic breathing (relaxation response). "
-    }
-  } else if (emotions.includes("sad") || emotions.includes("depressed") || emotions.includes("down")) {
-    response +=
-      "\n\nWhen feeling low, even tiny actions can help. Could you try one small thing today - maybe a 5-minute walk, listening to a song you love, or texting someone you care about? Small steps create momentum. "
-
-    response +=
-      "Also, practice self-compassion: speak to yourself like you would to a good friend going through this. What would you tell them? "
-  } else if (emotions.includes("angry") || emotions.includes("frustrated")) {
-    response +=
-      "\n\nAnger is a valid emotion that often masks hurt or frustration. It's okay to feel it. To process it healthily, try: **journaling** to express what's making you angry without filter, **physical activity** like a walk or stretching to release the energy, or **assertive communication** - expressing your needs calmly when you're ready. "
-  } else if (emotions.includes("lonely") || emotions.includes("isolated")) {
-    response +=
-      "\n\nLoneliness is painful, and I want you to know your need for connection is completely human and valid. Even small connections matter: sending a text to someone you trust, joining an online community about something you're interested in, or even just being kind to yourself. Sometimes we need to connect with ourselves first. "
-  } else if (emotions.includes("overwhelmed") || emotions.includes("stressed")) {
-    response +=
-      "\n\nWhen overwhelmed, try this: write down everything on your mind, then pick just ONE thing - the smallest, most manageable one - and focus only on that. You don't have to solve everything today. Break it down, set boundaries where you can, and remember that 'no' is a complete sentence. "
+      "**For Stress Relief:** Try this 2-minute break: Close your eyes, take 5 deep breaths, and tense then release each muscle group from your toes up to your head.\n\n"
   }
 
-  // 5. Encourage dialogue based on conversation context
-  const recentTopics = conversationContext.recentTopics.slice(0, 2)
-  if (recentTopics.length > 0) {
-    response += `\n\nEarlier you mentioned ${recentTopics.join(" and ")}. `
+  if (mentalHealthIndicators.anxiety > 70) {
+    response +=
+      "**For Anxiety:** Try box breathing right now: Breathe in for 4 counts, hold 4, out 4, hold 4. Repeat 4 times. This calms your nervous system.\n\n"
   }
 
-  const followUpQuestions = [
-    "How are you feeling right now as we talk about this?",
-    "What would help you feel even a little bit better in this moment?",
-    "Is there a specific aspect of this you'd like to explore together?",
-    "What's one thing you need most right now - to be heard, to find solutions, or just to know someone cares?",
-    "Would you like to talk more about what's on your mind?",
-  ]
+  if (mentalHealthIndicators.depression > 65) {
+    response +=
+      "**Important:** The feelings you're describing suggest depression. Please consider reaching out to a mental health professional. You deserve support, and help is available.\n\n"
+  }
 
-  response += followUpQuestions[Math.floor(Math.random() * followUpQuestions.length)]
+  const copingStrategies: Record<string, string> = {
+    anxiety:
+      "**Try this:** The 5-4-3-2-1 grounding technique - Name 5 things you see, 4 you can touch, 3 you hear, 2 you smell, and 1 you taste.",
+    sad: "**Gentle reminder:** Be compassionate with yourself. Do one tiny act of self-care today, even if it's just drinking water or stepping outside for 60 seconds.",
+    stress:
+      "**Strategy:** Make a brain dump list of everything on your mind. Then circle only the top 3 priorities. Everything else can wait.",
+    angry:
+      "**Release:** Physical movement helps - go for a brisk walk, do jumping jacks, or punch a pillow to move the energy through your body.",
+    hopeless:
+      "**Truth:** Depression lies. The thought 'nothing will help' is the illness talking, not reality. Please reach out to a therapist.",
+    overwhelmed:
+      "**Action:** Pick just ONE thing you can control right now. Focus only on that. You don't need to solve everything today.",
+    lonely:
+      "**Connection:** Reach out to one person today, even just a text saying 'thinking of you.' Small connections matter.",
+    tired: "**Rest:** Your body is asking for recovery. Can you give yourself permission to rest without guilt?",
+  }
 
-  return response
+  if (copingStrategies[detectedEmotion]) {
+    response += copingStrategies[detectedEmotion] + "\n\n"
+  }
+
+  const followUps: Record<string, string> = {
+    happy: "What's contributing most to these good feelings?",
+    sad: "What do you need most right now - to be heard, to problem-solve, or just to know someone cares?",
+    anxiety: "What specifically are you most worried about right now?",
+    angry: "What boundary was crossed or what need wasn't met?",
+    stress: "If you could take one thing off your plate, what would it be?",
+    hopeless: "How long have you been feeling this way? Have you talked to anyone else about this?",
+    lonely: "When do you feel most connected to others? What makes that different?",
+    overwhelmed: "What's taking up the most mental space for you right now?",
+    tired: "Are you getting enough sleep and taking care of your basic needs?",
+    excited: "Tell me more! What are you looking forward to?",
+    calm: "What's different about today that's making you feel more at peace?",
+    motivated: "What goal are you working toward? How can I support you?",
+    neutral: "What's really on your mind today?",
+  }
+
+  response += followUps[detectedEmotion] || "How can I best support you right now?"
+
+  return response.trim()
 }
