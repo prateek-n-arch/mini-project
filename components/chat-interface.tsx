@@ -19,11 +19,14 @@ export function ChatInterface() {
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [isRecordingAudio, setIsRecordingAudio] = useState(false)
-  const [isRecordingVideo, setIsRecordingVideo] = useState(false)
+  const [showCameraPreview, setShowCameraPreview] = useState(false)
+  const [capturedImage, setCapturedImage] = useState<string | null>(null)
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null)
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -67,56 +70,185 @@ export function ChatInterface() {
     }
   }
 
-  const startVideoRecording = async () => {
+  const startCameraPreview = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          facingMode: "user",
+        },
+      })
+      setCameraStream(stream)
+      setShowCameraPreview(true)
 
       if (videoPreviewRef.current) {
         videoPreviewRef.current.srcObject = stream
-        videoPreviewRef.current.play()
+
+        // Wait for video metadata to load
+        await new Promise((resolve, reject) => {
+          if (!videoPreviewRef.current) {
+            reject(new Error("Video ref is null"))
+            return
+          }
+
+          const video = videoPreviewRef.current
+
+          // Wait for metadata first
+          video.onloadedmetadata = () => {
+            console.log("[v0] Video metadata loaded")
+            video
+              .play()
+              .then(() => {
+                console.log("[v0] Video started playing")
+
+                // Wait for first frame to be rendered
+                const checkVideoReady = () => {
+                  if (video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= 2) {
+                    console.log("[v0] Video fully ready, dimensions:", video.videoWidth, "x", video.videoHeight)
+                    // Give it extra time to ensure frames are rendering
+                    setTimeout(resolve, 1000)
+                  } else {
+                    console.log("[v0] Waiting for video to be ready...")
+                    setTimeout(checkVideoReady, 100)
+                  }
+                }
+
+                checkVideoReady()
+              })
+              .catch(reject)
+          }
+
+          video.onerror = () => {
+            reject(new Error("Video failed to load"))
+          }
+        })
       }
-
-      const mediaRecorder = new MediaRecorder(stream)
-      mediaRecorderRef.current = mediaRecorder
-      chunksRef.current = []
-
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) {
-          chunksRef.current.push(e.data)
-        }
-      }
-
-      mediaRecorder.onstop = async () => {
-        const videoBlob = new Blob(chunksRef.current, { type: "video/webm" })
-        await processVideoInput(videoBlob)
-        stream.getTracks().forEach((track) => track.stop())
-        if (videoPreviewRef.current) {
-          videoPreviewRef.current.srcObject = null
-        }
-      }
-
-      mediaRecorder.start()
-      setIsRecordingVideo(true)
     } catch (error) {
       console.error("[v0] Error accessing camera:", error)
       alert("Unable to access camera. Please check your permissions.")
+      cancelCameraPreview()
     }
   }
 
-  const stopVideoRecording = () => {
-    if (mediaRecorderRef.current && isRecordingVideo) {
-      mediaRecorderRef.current.stop()
-      setIsRecordingVideo(false)
+  const captureImage = () => {
+    if (!videoPreviewRef.current || !cameraStream) {
+      console.error("[v0] Video or stream not ready")
+      alert("Camera not ready. Please try again.")
+      return
+    }
+
+    const video = videoPreviewRef.current
+
+    if (video.readyState < 2) {
+      console.error("[v0] Video not ready yet, readyState:", video.readyState)
+      alert("Please wait for the camera to fully initialize")
+      return
+    }
+
+    if (video.videoWidth === 0 || video.videoHeight === 0) {
+      console.error("[v0] Video has no dimensions yet")
+      alert("Camera is still initializing, please wait a moment")
+      return
+    }
+
+    const canvas = document.createElement("canvas")
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
+    const ctx = canvas.getContext("2d", { willReadFrequently: false })
+
+    if (!ctx) {
+      console.error("[v0] Could not get canvas context")
+      alert("Failed to capture image. Please try again.")
+      return
+    }
+
+    try {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+
+      // Convert to JPEG with good quality
+      const imageDataUrl = canvas.toDataURL("image/jpeg", 0.92)
+
+      if (imageDataUrl.length < 1000) {
+        console.error("[v0] Captured image is too small, likely blank:", imageDataUrl.length, "bytes")
+        alert("Failed to capture image. Please ensure your camera is working and try again.")
+        return
+      }
+
+      console.log("[v0] Image captured successfully, size:", imageDataUrl.length, "bytes")
+      setCapturedImage(imageDataUrl)
+
+      // Don't stop camera stream yet - do it after analysis
+      setShowCameraPreview(false)
+
+      // Send to backend for emotion analysis
+      analyzeImageEmotion(imageDataUrl).finally(() => {
+        if (cameraStream) {
+          cameraStream.getTracks().forEach((track) => track.stop())
+          setCameraStream(null)
+        }
+      })
+    } catch (error) {
+      console.error("[v0] Error capturing image:", error)
+      alert("Failed to capture image. Please try again.")
+    }
+  }
+
+  const cancelCameraPreview = () => {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach((track) => track.stop())
+      setCameraStream(null)
+    }
+    setShowCameraPreview(false)
+    setCapturedImage(null)
+  }
+
+  const analyzeImageEmotion = async (imageDataUrl: string) => {
+    try {
+      console.log("[v0] Sending image to backend, size:", imageDataUrl.length)
+
+      const response = await fetch("/api/analyze/image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: imageDataUrl }),
+      })
+
+      if (!response.ok) throw new Error("Failed to analyze image")
+
+      const emotionData = await response.json()
+      console.log("[v0] Backend emotion analysis:", emotionData)
+
+      const emotionMessage = `[Image Analysis]\nDetected emotions: ${emotionData.emotions.join(", ")}\nDominant emotion: ${emotionData.dominantEmotion}\nMental state: ${emotionData.mentalState}\nConfidence: ${emotionData.confidence}%\n\nBased on your facial expression, you seem to be feeling ${emotionData.dominantEmotion}. Would you like to talk about it?`
+
+      setInput(emotionMessage)
+
+      setTimeout(() => {
+        setCapturedImage(null)
+      }, 3000)
+    } catch (error) {
+      console.error("[v0] Error analyzing image emotion:", error)
+      setInput("[Image captured] Please describe how you're feeling right now.")
+      setCapturedImage(null)
     }
   }
 
   const transcribeAudio = async (audioBlob: Blob) => {
     try {
-      console.log("[v0] Analyzing voice emotion from audio")
+      console.log("[v0] Sending audio to backend for analysis")
 
-      // Analyze voice emotion (pitch, tone, intensity)
-      const voiceEmotion = await analyzeVoiceEmotion(audioBlob)
-      console.log("[v0] Voice emotion detected:", voiceEmotion)
+      // Send to backend for voice emotion analysis
+      const formData = new FormData()
+      formData.append("audio", audioBlob, "audio.webm")
+
+      const response = await fetch("/api/analyze/voice", {
+        method: "POST",
+        body: formData,
+      })
+
+      if (!response.ok) throw new Error("Failed to analyze voice")
+
+      const voiceData = await response.json()
+      console.log("[v0] Backend voice analysis:", voiceData)
 
       // Use browser's Speech Recognition API for transcription
       if ("webkitSpeechRecognition" in window || "SpeechRecognition" in window) {
@@ -126,55 +258,30 @@ export function ChatInterface() {
         recognition.interimResults = false
         recognition.lang = "en-US"
 
-        recognition.onstart = () => {
-          console.log("[v0] Speech recognition started")
-        }
-
         recognition.onresult = (event: any) => {
           const transcript = event.results[0][0].transcript
           console.log("[v0] Transcribed text:", transcript)
-          // Add emotion context to the message
-          const messageWithEmotion = `${transcript}\n[Voice Analysis: ${voiceEmotion.emotion} - ${voiceEmotion.intensity} intensity]`
+
+          // Add voice emotion analysis to the message
+          const messageWithEmotion = `${transcript}\n[Voice Analysis: ${voiceData.emotion} (${voiceData.confidence}% confident) - Energy: ${voiceData.energy}, Stress: ${voiceData.stress}]`
           setInput(messageWithEmotion)
         }
 
-        recognition.onerror = (error: any) => {
-          console.error("[v0] Speech recognition error:", error)
-          // Fallback: just add emotion analysis without transcription
-          setInput(`[Voice message recorded - Detected emotion: ${voiceEmotion.emotion}]`)
+        recognition.onerror = () => {
+          setInput(
+            `[Voice recorded]\nEmotion: ${voiceData.emotion}\nEnergy: ${voiceData.energy}\nStress level: ${voiceData.stress}\n\nPlease type what you wanted to say.`,
+          )
         }
 
         recognition.start()
       } else {
-        // Fallback for browsers without speech recognition
-        setInput(`[Voice message recorded - Detected emotion: ${voiceEmotion.emotion}]`)
+        setInput(
+          `[Voice recorded]\nEmotion: ${voiceData.emotion}\nEnergy: ${voiceData.energy}\nStress level: ${voiceData.stress}\n\nPlease type what you wanted to say.`,
+        )
       }
     } catch (error) {
       console.error("[v0] Error in voice analysis:", error)
-      alert("Voice recording completed. Please type your message or try again.")
-    }
-  }
-
-  const processVideoInput = async (videoBlob: Blob) => {
-    try {
-      console.log("[v0] Processing video for emotion detection, size:", videoBlob.size)
-
-      // Extract frame from video for facial emotion analysis
-      const emotionData = await analyzeFacialEmotion(videoBlob)
-      console.log("[v0] Facial emotion detected:", emotionData)
-
-      // Create a message with the emotion analysis
-      const emotionMessage = `[Video Analysis]\nDetected emotions: ${emotionData.emotions.join(", ")}\nOverall mood: ${emotionData.overallMood}\nConfidence: ${emotionData.confidence}%`
-
-      setInput(emotionMessage)
-
-      // Show feedback to user
-      alert(
-        `Facial emotion analysis complete!\nDetected: ${emotionData.overallMood}\n\nYou can now send this analysis or add your own message.`,
-      )
-    } catch (error) {
-      console.error("[v0] Error in facial emotion analysis:", error)
-      alert("Video recorded but emotion analysis failed. Please try again or type your message.")
+      setInput("[Voice recorded] Please type your message.")
     }
   }
 
@@ -262,14 +369,38 @@ export function ChatInterface() {
 
   return (
     <div className="flex flex-1 flex-col">
-      {isRecordingVideo && (
+      {showCameraPreview && (
         <div className="border-b bg-muted/50 p-4">
           <div className="mx-auto max-w-4xl">
             <div className="relative aspect-video overflow-hidden rounded-lg bg-black">
-              <video ref={videoPreviewRef} className="h-full w-full object-cover" autoPlay muted playsInline />
-              <div className="absolute right-4 top-4 flex items-center gap-2 rounded-full bg-red-500 px-3 py-1 text-sm font-medium text-white">
-                <div className="h-2 w-2 animate-pulse rounded-full bg-white" />
-                Recording
+              <video
+                ref={videoPreviewRef}
+                className="h-full w-full object-cover"
+                autoPlay
+                muted
+                playsInline
+                style={{ transform: "scaleX(-1)" }} // Mirror for selfie view
+              />
+              <div className="absolute bottom-4 left-1/2 flex -translate-x-1/2 gap-3">
+                <Button onClick={captureImage} size="lg" className="bg-primary hover:bg-primary/90">
+                  📸 Capture Photo
+                </Button>
+                <Button onClick={cancelCameraPreview} size="lg" variant="outline">
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {capturedImage && !showCameraPreview && (
+        <div className="border-b bg-muted/50 p-4">
+          <div className="mx-auto max-w-4xl">
+            <div className="relative overflow-hidden rounded-lg">
+              <img src={capturedImage || "/placeholder.svg"} alt="Captured" className="w-full rounded-lg" />
+              <div className="absolute right-4 top-4 rounded-full bg-green-500 px-3 py-1 text-sm font-medium text-white shadow-lg">
+                ✓ Analyzing emotions...
               </div>
             </div>
           </div>
@@ -338,7 +469,7 @@ export function ChatInterface() {
                   handleSubmit(e)
                 }
               }}
-              disabled={isRecordingAudio || isRecordingVideo}
+              disabled={isRecordingAudio || showCameraPreview}
             />
             <Button
               type="button"
@@ -346,24 +477,24 @@ export function ChatInterface() {
               variant={isRecordingAudio ? "destructive" : "outline"}
               className="h-12 w-12 shrink-0"
               onClick={isRecordingAudio ? stopAudioRecording : startAudioRecording}
-              disabled={isRecordingVideo}
+              disabled={showCameraPreview}
             >
               {isRecordingAudio ? <StopCircle className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
             </Button>
             <Button
               type="button"
               size="icon"
-              variant={isRecordingVideo ? "destructive" : "outline"}
+              variant={showCameraPreview ? "default" : "outline"}
               className="h-12 w-12 shrink-0"
-              onClick={isRecordingVideo ? stopVideoRecording : startVideoRecording}
-              disabled={isRecordingAudio}
+              onClick={startCameraPreview}
+              disabled={isRecordingAudio || showCameraPreview}
             >
-              {isRecordingVideo ? <StopCircle className="h-5 w-5" /> : <Video className="h-5 w-5" />}
+              <Video className="h-5 w-5" />
             </Button>
             <Button
               type="submit"
               size="icon"
-              disabled={!input.trim() || isLoading || isRecordingAudio || isRecordingVideo}
+              disabled={!input.trim() || isLoading || isRecordingAudio || showCameraPreview}
               className="h-12 w-12 shrink-0"
             >
               <Send className="h-5 w-5" />
@@ -373,170 +504,4 @@ export function ChatInterface() {
       </div>
     </div>
   )
-}
-
-const analyzeVoiceEmotion = async (
-  audioBlob: Blob,
-): Promise<{ emotion: string; intensity: string; details: string }> => {
-  return new Promise((resolve) => {
-    const audioContext = new AudioContext()
-    const reader = new FileReader()
-
-    reader.onload = async () => {
-      try {
-        const arrayBuffer = reader.result as ArrayBuffer
-        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer)
-
-        // Analyze audio characteristics
-        const channelData = audioBuffer.getChannelData(0)
-        let sum = 0
-        let peakAmplitude = 0
-
-        for (let i = 0; i < channelData.length; i++) {
-          const abs = Math.abs(channelData[i])
-          sum += abs
-          if (abs > peakAmplitude) peakAmplitude = abs
-        }
-
-        const averageAmplitude = sum / channelData.length
-        const duration = audioBuffer.duration
-
-        // Simple emotion detection based on voice characteristics
-        let emotion = "neutral"
-        let intensity = "moderate"
-        let details = ""
-
-        // High amplitude + short duration = possibly excited/angry
-        if (averageAmplitude > 0.1 && peakAmplitude > 0.5) {
-          emotion = "excited or stressed"
-          intensity = "high"
-          details = "High energy detected in voice"
-        }
-        // Low amplitude = possibly sad/tired
-        else if (averageAmplitude < 0.05) {
-          emotion = "calm or sad"
-          intensity = "low"
-          details = "Low energy, possibly tired or sad"
-        }
-        // Moderate = neutral
-        else {
-          emotion = "neutral"
-          intensity = "moderate"
-          details = "Balanced emotional tone"
-        }
-
-        resolve({ emotion, intensity, details })
-      } catch (error) {
-        console.error("[v0] Audio analysis error:", error)
-        resolve({ emotion: "unknown", intensity: "moderate", details: "Could not analyze" })
-      }
-    }
-
-    reader.onerror = () => {
-      resolve({ emotion: "unknown", intensity: "moderate", details: "Analysis failed" })
-    }
-
-    reader.readAsArrayBuffer(audioBlob)
-  })
-}
-
-const analyzeFacialEmotion = async (
-  videoBlob: Blob,
-): Promise<{ emotions: string[]; overallMood: string; confidence: number }> => {
-  return new Promise((resolve) => {
-    // Create video element to extract frames
-    const video = document.createElement("video")
-    const canvas = document.createElement("canvas")
-    const ctx = canvas.getContext("2d")
-
-    video.src = URL.createObjectURL(videoBlob)
-    video.muted = true
-
-    video.onloadeddata = () => {
-      // Set canvas size to video size
-      canvas.width = video.videoWidth
-      canvas.height = video.videoHeight
-
-      // Seek to middle of video for best frame
-      video.currentTime = video.duration / 2
-    }
-
-    video.onseeked = () => {
-      if (!ctx) {
-        resolve({ emotions: ["unknown"], overallMood: "neutral", confidence: 0 })
-        return
-      }
-
-      // Draw video frame to canvas
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-
-      // Get image data for analysis
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-      const data = imageData.data
-
-      // Simple brightness and color analysis as proxy for emotions
-      let totalBrightness = 0
-      let redSum = 0
-      let blueSum = 0
-      let greenSum = 0
-
-      for (let i = 0; i < data.length; i += 4) {
-        const r = data[i]
-        const g = data[i + 1]
-        const b = data[i + 2]
-
-        redSum += r
-        greenSum += g
-        blueSum += b
-        totalBrightness += (r + g + b) / 3
-      }
-
-      const pixelCount = data.length / 4
-      const avgBrightness = totalBrightness / pixelCount
-      const avgRed = redSum / pixelCount
-      const avgGreen = greenSum / pixelCount
-      const avgBlue = blueSum / pixelCount
-
-      // Determine emotions based on lighting and color tone
-      // (In production, you'd use a real facial recognition ML model)
-      const emotions: string[] = []
-      let overallMood = "neutral"
-
-      // Bright environment = possibly happy/energetic
-      if (avgBrightness > 150) {
-        emotions.push("positive", "alert")
-        overallMood = "upbeat"
-      }
-      // Dark environment = possibly sad/tired
-      else if (avgBrightness < 80) {
-        emotions.push("tired", "withdrawn")
-        overallMood = "low energy"
-      }
-      // Warm tones = possibly calm/content
-      else if (avgRed > avgBlue && avgRed > avgGreen) {
-        emotions.push("warm", "engaged")
-        overallMood = "comfortable"
-      }
-      // Cool tones = possibly anxious/calm
-      else if (avgBlue > avgRed) {
-        emotions.push("calm", "thoughtful")
-        overallMood = "contemplative"
-      } else {
-        emotions.push("neutral", "balanced")
-        overallMood = "neutral"
-      }
-
-      // Confidence based on video quality
-      const confidence = Math.min(90, Math.round((avgBrightness / 255) * 100))
-
-      // Clean up
-      URL.revokeObjectURL(video.src)
-
-      resolve({ emotions, overallMood, confidence })
-    }
-
-    video.onerror = () => {
-      resolve({ emotions: ["unknown"], overallMood: "neutral", confidence: 0 })
-    }
-  })
 }

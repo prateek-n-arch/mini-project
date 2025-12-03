@@ -22,6 +22,20 @@ interface ConversationContext {
   sessionLength: number
 }
 
+interface VoiceEmotionData {
+  emotion: string
+  energy: string
+  stress: string
+  confidence: number
+}
+
+interface ImageEmotionData {
+  emotions: string[]
+  dominantEmotion: string
+  mentalState: string
+  confidence: number
+}
+
 // Sentiment and emotion detection
 const SENTIMENT_KEYWORDS = {
   crisis: [
@@ -175,42 +189,82 @@ function buildConversationContext(history: any[]): ConversationContext {
 export function analyzeMentalState(
   message: string,
   recentMoods: MoodEntry[] = [],
-  emotionData?: { voice?: any; video?: any },
+  emotionData?: { voice?: VoiceEmotionData; video?: ImageEmotionData },
 ): AnalysisResult {
   const lowerMessage = message.toLowerCase()
 
-  // Extract emotion insights from voice/video analysis if present
-  const voiceEmotionInsights: string[] = []
-  let videoEmotionInsights: string[] = []
+  const detectedEmotions: string[] = []
 
-  if (emotionData?.voice) {
-    voiceEmotionInsights.push(emotionData.voice.emotion)
-    // High intensity voice = possible stress/excitement
-    if (emotionData.voice.intensity === "high") {
-      voiceEmotionInsights.push("heightened emotional state")
+  // Add emotions from image analysis
+  if (emotionData?.video) {
+    detectedEmotions.push(emotionData.video.dominantEmotion)
+    if (emotionData.video.confidence > 60) {
+      detectedEmotions.push(...emotionData.video.emotions.slice(0, 2))
     }
   }
 
-  if (emotionData?.video) {
-    videoEmotionInsights = emotionData.video.emotions || []
+  // Add emotions from voice analysis
+  if (emotionData?.voice) {
+    detectedEmotions.push(emotionData.voice.emotion)
+
+    // Map energy and stress levels to emotions
+    if (emotionData.voice.energy === "high" && emotionData.voice.stress === "high") {
+      detectedEmotions.push("anxiety", "stress")
+    } else if (emotionData.voice.energy === "low") {
+      detectedEmotions.push("fatigue", "low-mood")
+    }
+
+    if (emotionData.voice.stress === "high") {
+      detectedEmotions.push("overwhelm")
+    }
   }
 
-  // Detect emotions present in the message
-  const detectedEmotions: string[] = []
+  // Detect emotions from text
   Object.entries(EMOTION_PATTERNS).forEach(([emotion, keywords]) => {
     if (keywords.some((keyword) => lowerMessage.includes(keyword))) {
       detectedEmotions.push(emotion)
     }
   })
 
-  // Analyze sentiment
+  const hasCrisisKeywords = SENTIMENT_KEYWORDS.crisis.some((keyword) => lowerMessage.includes(keyword))
+  const hasLowEnergyVoice = emotionData?.voice?.energy === "low" && emotionData?.voice?.stress === "high"
+  const hasNegativeImage = emotionData?.video?.dominantEmotion === "sad" && emotionData?.video?.confidence > 70
+
+  if (hasCrisisKeywords || (hasLowEnergyVoice && hasNegativeImage)) {
+    return {
+      sentiment: "crisis",
+      emotions: detectedEmotions,
+      concerns: ["immediate support needed"],
+      supportType: "crisis",
+    }
+  }
+
   const negativeCount = SENTIMENT_KEYWORDS.negative.filter((word) => lowerMessage.includes(word)).length
   const positiveCount = SENTIMENT_KEYWORDS.positive.filter((word) => lowerMessage.includes(word)).length
 
+  // Weight sentiment based on voice/image emotion
+  let sentimentScore = positiveCount - negativeCount
+
+  if (emotionData?.voice) {
+    if (emotionData.voice.emotion.includes("sad") || emotionData.voice.emotion.includes("anxious")) {
+      sentimentScore -= 1
+    } else if (emotionData.voice.emotion.includes("excited") || emotionData.voice.emotion.includes("content")) {
+      sentimentScore += 1
+    }
+  }
+
+  if (emotionData?.video) {
+    if (emotionData.video.dominantEmotion === "sad" || emotionData.video.dominantEmotion === "anxious") {
+      sentimentScore -= 1
+    } else if (emotionData.video.dominantEmotion === "happy" || emotionData.video.dominantEmotion === "content") {
+      sentimentScore += 1
+    }
+  }
+
   let sentiment: AnalysisResult["sentiment"]
-  if (negativeCount > positiveCount) {
+  if (sentimentScore < -1) {
     sentiment = "negative"
-  } else if (positiveCount > negativeCount) {
+  } else if (sentimentScore > 1) {
     sentiment = "positive"
   } else {
     sentiment = "neutral"
@@ -233,6 +287,21 @@ export function analyzeMentalState(
     }
   }
 
+  if (emotionData?.voice && emotionData.voice.stress === "high" && emotionData.voice.confidence > 65) {
+    concerns.push("high stress detected in voice")
+  }
+
+  if (emotionData?.video && emotionData.video.dominantEmotion === "sad" && emotionData.video.confidence > 70) {
+    concerns.push("visible signs of distress")
+  }
+
+  // Check for mismatch between modalities (concerning sign)
+  const textPositive = positiveCount > negativeCount
+  const voiceNegative = emotionData?.voice?.emotion.includes("sad") || emotionData?.voice?.emotion.includes("anxious")
+  if (textPositive && voiceNegative && emotionData?.voice?.confidence > 60) {
+    concerns.push("emotional incongruence detected - may be masking feelings")
+  }
+
   // Determine support type needed
   let supportType: AnalysisResult["supportType"]
   if (lowerMessage.includes("?") && !SENTIMENT_KEYWORDS.crisis.some((keyword) => lowerMessage.includes(keyword))) {
@@ -245,13 +314,12 @@ export function analyzeMentalState(
     supportType = "validation"
   }
 
-  const combinedEmotions = [...detectedEmotions, ...voiceEmotionInsights, ...videoEmotionInsights].filter(
-    (v, i, a) => a.indexOf(v) === i,
-  ) // Remove duplicates
+  // Remove duplicates
+  const uniqueEmotions = [...new Set(detectedEmotions)]
 
   return {
     sentiment,
-    emotions: combinedEmotions.length > 0 ? combinedEmotions : detectedEmotions,
+    emotions: uniqueEmotions,
     concerns,
     supportType,
   }
@@ -261,7 +329,7 @@ export function generateResponse(
   message: string,
   analysis: AnalysisResult,
   conversationHistory: any[] = [],
-  emotionData?: { voice?: any; video?: any },
+  emotionData?: { voice?: VoiceEmotionData; video?: ImageEmotionData },
 ): string {
   // Crisis response
   if (analysis.sentiment === "crisis") {
@@ -358,24 +426,50 @@ You don't have to face this alone. Professional support is available 24/7.`
     const emotionAwareness = []
 
     if (emotionData.voice) {
-      if (emotionData.voice.intensity === "high") {
-        emotionAwareness.push(`I can sense a lot of energy in your voice`)
-      } else if (emotionData.voice.intensity === "low") {
-        emotionAwareness.push(`I notice your voice sounds quiet and gentle`)
+      // Acknowledge voice tone with empathy
+      if (emotionData.voice.stress === "high") {
+        emotionAwareness.push(`I can hear the tension in your voice`)
+      } else if (emotionData.voice.energy === "low") {
+        emotionAwareness.push(`I notice you sound tired or perhaps a bit down`)
+      } else if (emotionData.voice.energy === "high" && emotionData.voice.stress === "normal") {
+        emotionAwareness.push(`I can hear energy and engagement in your voice`)
+      }
+
+      // Acknowledge specific emotions from voice
+      if (emotionData.voice.emotion.includes("anxious") || emotionData.voice.emotion.includes("stressed")) {
+        emotionAwareness.push(`your voice carries some worry or anxiety`)
       }
     }
 
     if (emotionData.video) {
-      if (emotionData.video.overallMood === "upbeat") {
+      // Acknowledge facial expressions with care
+      if (emotionData.video.dominantEmotion === "sad") {
+        emotionAwareness.push(`I can see this is weighing on you`)
+      } else if (emotionData.video.dominantEmotion === "happy") {
         emotionAwareness.push(`I can see some brightness in your expression`)
-      } else if (emotionData.video.overallMood === "low energy") {
-        emotionAwareness.push(`I notice you might be feeling tired or low`)
+      } else if (emotionData.video.dominantEmotion === "anxious") {
+        emotionAwareness.push(`I notice signs of worry in your expression`)
+      } else if (emotionData.video.dominantEmotion === "tired") {
+        emotionAwareness.push(`you look like you might be feeling exhausted`)
+      }
+
+      // Reference mental state analysis
+      if (emotionData.video.mentalState && emotionData.video.confidence > 65) {
+        emotionAwareness.push(`${emotionData.video.mentalState.toLowerCase()}`)
       }
     }
 
     if (emotionAwareness.length > 0) {
       response = emotionAwareness.join(", and ") + ". " + response
     }
+  }
+
+  if (analysis.concerns.includes("emotional incongruence detected - may be masking feelings")) {
+    response += ` I'm sensing there might be more beneath the surface of what you're saying. It's okay to not be okay, and you don't have to put on a brave face with me. `
+  }
+
+  if (analysis.concerns.includes("high stress detected in voice")) {
+    response += ` Your stress level seems quite high right now. Let's take a moment - can you try taking three slow, deep breaths with me? `
   }
 
   // Context-aware gentle closing based on conversation length
